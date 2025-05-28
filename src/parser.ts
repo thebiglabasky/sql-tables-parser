@@ -1,56 +1,72 @@
+import { defaultSqlKeywords, getKeywordsForDatabase } from './sql-keywords-config.js';
+
+export interface TableExtractionResult {
+  /** All tables found in the query */
+  allTables: string[];
+  /** Tables that exist in the known tables set (empty if no filtering) */
+  realTables: string[];
+  /** CTE tables that were filtered out (empty if no filtering) */
+  filteredCTEs: string[];
+}
+
 interface TableExtractionOptions {
   /** Set of known real table names from Metabase's table index */
   knownTables?: Set<string>;
   /** Whether to filter out CTE tables using the known tables set */
   filterCTEs?: boolean;
-  /** Additional keywords that might precede table names */
+  /** Custom keywords that might precede table names */
   customKeywords?: string[];
-}
-
-interface TableExtractionResult {
-  /** All extracted table names (including potential CTEs) */
-  allTables: string[];
-  /** Only real tables (if filtering enabled) */
-  realTables: string[];
-  /** Potential CTE names that were filtered out */
-  filteredCTEs: string[];
+  /** Database type for automatic keyword inclusion (deprecated - use keywords instead) */
+  databaseType?: 'postgresql' | 'mysql' | 'sqlserver' | 'oracle' | 'bigquery' | 'snowflake' | 'sqlite';
+  /** Direct list of keywords to use (overrides databaseType if provided) */
+  keywords?: string[];
 }
 
 class SqlTableExtractor {
-  private static readonly DEFAULT_KEYWORDS = [
-    'FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN',
-    'CROSS JOIN', 'OUTER JOIN', 'INTO', 'UPDATE', 'DELETE FROM'
-  ];
-
   /**
-   * Extract table names from SQL query using the naive post-keyword approach
+   * Extract table names from SQL query using simplified approach
    */
   static extractTableNames(
     sql: string,
     options: TableExtractionOptions = {}
   ): TableExtractionResult {
-    const { knownTables, filterCTEs = false, customKeywords = [] } = options;
+    const { knownTables, filterCTEs = false, customKeywords = [], databaseType, keywords } = options;
 
     // Step 1: Clean the SQL by removing comments and string literals
     const cleanSql = this.removeCommentsAndStrings(sql);
 
-    // Step 2: Build the regex pattern with all keywords
-    const allKeywords = [...this.DEFAULT_KEYWORDS, ...customKeywords];
+    // Step 2: Build the keyword list
+    let allKeywords: string[];
+
+    if (keywords && keywords.length > 0) {
+      // Use provided keywords directly
+      allKeywords = keywords;
+    } else if (databaseType) {
+      // Use database-specific keywords from config (backward compatibility)
+      allKeywords = getKeywordsForDatabase(databaseType);
+    } else {
+      // Use default keywords from config
+      allKeywords = defaultSqlKeywords.default;
+    }
+
+    // Add any custom keywords
+    if (customKeywords.length > 0) {
+      allKeywords = [...allKeywords, ...customKeywords];
+    }
+
+    // Remove duplicates
+    allKeywords = Array.from(new Set(allKeywords));
+
     const keywordPattern = allKeywords.join('|');
 
-    // Step 3: Extract table names
-    // This regex handles:
-    // - Quoted identifiers: `table_name` or "table_name" or [table_name]
-    // - Schema.table notation: schema.table
-    // - Regular identifiers: table_name
+    // Step 3: Extract table names with simplified regex approach
     const regex = new RegExp(
-      `(?:${keywordPattern})\\s+` +                    // Keywords followed by whitespace
-      `(?:` +
-        `\`([^\`]+)\`` +                               // Backtick quoted: `table`
-        `|"([^"]+)"` +                                 // Double quoted: "table"
-        `|\\[([^\\]]+)\\]` +                           // Square bracket quoted: [table]
-        `|([\\w\\.]+)` +                               // Regular identifier with optional schema
-      `)`,
+      '(?:' + keywordPattern + ')\\s+' +               // Keywords followed by whitespace
+      '(' +                                            // Capture the full table identifier
+        // Multi-part identifiers: [db].[schema].[table], "db"."schema"."table", db.schema.table
+        '(?:\\[[^\\]]+\\]|"[^"]+"|`[^`]+`|[\\w@#]+)' +  // First part
+        '(?:\\.(?:\\[[^\\]]+\\]|"[^"]+"|`[^`]+`|[\\w@#]+))*' +  // Additional parts
+      ')',                                             // End capture group
       'gi'
     );
 
@@ -58,22 +74,38 @@ class SqlTableExtractor {
     let match;
 
     while ((match = regex.exec(cleanSql)) !== null) {
-      // Get the table name from whichever capture group matched
-      const tableName = match[1] || match[2] || match[3] || match[4];
+      const tableIdentifier = match[1];
 
-      if (tableName) {
-        // For quoted identifiers, preserve the full name including spaces
-        // For unquoted identifiers, split on whitespace and take first part (removes aliases)
-        let cleanTableName: string;
-        if (match[1] || match[2] || match[3]) {
-          // This is a quoted identifier, preserve spaces
-          cleanTableName = tableName.trim();
-        } else {
-          // This is an unquoted identifier, remove aliases
-          cleanTableName = tableName.trim().split(/\s+/)[0];
+      if (tableIdentifier) {
+        // Check if this looks like a function call
+        const matchEnd = match.index + match[0].length;
+        const remainingText = cleanSql.slice(matchEnd);
+        const isFunction = /^\s*\(/.test(remainingText);
+
+        if (isFunction) {
+          // Extract the keyword to determine context
+          const keywordMatch = match[0].match(new RegExp('^(' + keywordPattern + ')\\s+', 'i'));
+          if (keywordMatch) {
+            const keyword = keywordMatch[1].toUpperCase();
+
+            // Only skip functions in FROM/JOIN contexts, not in INSERT/UPDATE/MERGE contexts
+            const isFunctionContext = keyword === 'FROM' || keyword.includes('JOIN') || keyword === 'USING';
+
+            if (isFunctionContext) {
+              continue;
+            }
+          }
         }
 
-        // Handle schema.table notation - keep the full name
+        // Clean the table identifier by removing quotes/brackets
+        let cleanTableName: string;
+
+        // Remove quotes and brackets but preserve the content and dots
+        cleanTableName = tableIdentifier
+          .replace(/\[([^\]]+)\]/g, '$1')  // [name] -> name
+          .replace(/"([^"]+)"/g, '$1')     // "name" -> name
+          .replace(/`([^`]+)`/g, '$1');    // `name` -> name
+
         extractedTables.add(cleanTableName);
       }
     }
@@ -108,7 +140,7 @@ class SqlTableExtractor {
   }
 
   /**
-   * Remove SQL comments and string literals from the query string
+   * Remove SQL comments and string literals from the query string (simplified)
    */
   private static removeCommentsAndStrings(sql: string): string {
     let result = '';
@@ -120,7 +152,6 @@ class SqlTableExtractor {
 
       // Handle single-line comments (-- comment)
       if (char === '-' && nextChar === '-') {
-        // Skip until end of line
         while (i < sql.length && sql[i] !== '\n') {
           i++;
         }
@@ -130,7 +161,6 @@ class SqlTableExtractor {
       // Handle multi-line comments (/* comment */)
       if (char === '/' && nextChar === '*') {
         i += 2; // Skip /*
-        // Skip until */
         while (i < sql.length - 1) {
           if (sql[i] === '*' && sql[i + 1] === '/') {
             i += 2; // Skip */
@@ -141,10 +171,9 @@ class SqlTableExtractor {
         continue;
       }
 
-      // Handle single-quoted strings ('string')
+      // Handle single-quoted strings ('string') - always treat as string literals
       if (char === "'") {
         i++; // Skip opening quote
-        // Skip until closing quote, handling escaped quotes
         while (i < sql.length) {
           if (sql[i] === "'") {
             if (sql[i + 1] === "'") {
@@ -159,69 +188,32 @@ class SqlTableExtractor {
             i++;
           }
         }
-        // Replace the entire string with a space
-        result += ' ';
+        result += ' '; // Replace with space
         continue;
       }
 
-      // Handle double-quoted strings/identifiers ("string" or "identifier")
+      // Handle double-quoted strings/identifiers - simplified logic
       if (char === '"') {
-        // Look back to see if this might be an identifier (after FROM, JOIN, etc.)
-        const beforeQuote = result.trim().split(/\s+/).slice(-2).join(' ').toUpperCase();
-        const isLikelyIdentifier = beforeQuote && (
-          beforeQuote.endsWith('FROM') ||
-          beforeQuote.endsWith('JOIN') ||
-          beforeQuote.endsWith('UPDATE') ||
-          beforeQuote.endsWith('INTO')
-        );
+        // Simple heuristic: if preceded by =, !=, <, >, it's likely a string literal
+        const beforeQuote = result.slice(-10);
+        const isStringLiteral = /[=!<>]\s*$/.test(beforeQuote);
 
-        // Also check for comparison operators that suggest this is a string literal
-        const hasComparisonOperator = /[=!<>]\s*$/.test(result.slice(-10));
-
-        // If it looks like an identifier context and no comparison operator, keep it
-        if (isLikelyIdentifier && !hasComparisonOperator) {
-          // This is likely a quoted identifier, preserve it entirely
-          result += char; // Add opening quote
-          i++; // Move past opening quote
-
-          // Copy everything until closing quote
+        if (isStringLiteral) {
+          // Treat as string literal, remove it
+          i++; // Skip opening quote
           while (i < sql.length) {
-            result += sql[i];
             if (sql[i] === '"') {
-              if (sql[i + 1] === '"') {
-                // Escaped quote, copy both
-                i++;
-                result += sql[i];
-              } else {
-                // Closing quote, we're done
-                i++;
-                break;
-              }
-            }
-            i++;
-          }
-          continue;
-        }
-
-        // Otherwise, treat as string literal and remove it
-        i++; // Skip opening quote
-        // Skip until closing quote, handling escaped quotes
-        while (i < sql.length) {
-          if (sql[i] === '"') {
-            if (sql[i + 1] === '"') {
-              // Escaped quote, skip both
-              i += 2;
-            } else {
-              // Closing quote
-              i++;
+              i++; // Skip closing quote
               break;
             }
-          } else {
             i++;
           }
+          result += ' '; // Replace with space
+        } else {
+          // Treat as identifier, preserve it
+          result += char;
+          i++;
         }
-        // Replace the entire string with a space
-        result += ' ';
         continue;
       }
 
@@ -230,10 +222,7 @@ class SqlTableExtractor {
       i++;
     }
 
-    return result
-      // Clean up extra whitespace
-      .replace(/\s+/g, ' ')
-      .trim();
+    return result.replace(/\s+/g, ' ').trim();
   }
 
   /**
@@ -248,4 +237,5 @@ class SqlTableExtractor {
   }
 }
 
-export { SqlTableExtractor, TableExtractionOptions, TableExtractionResult };
+export { SqlTableExtractor, TableExtractionOptions };
+
