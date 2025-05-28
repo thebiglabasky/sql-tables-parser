@@ -1,6 +1,6 @@
 # SQL Tables Parser
 
-A robust CLI tool to parse SQL queries and extract table names using a regex-based approach that handles CTEs, joins, schema notation, quoted identifiers, and string literals.
+CLI tool to parse SQL queries and extract table names using a regex-based approach that handles CTEs, joins, schema notation, quoted identifiers, and string literals.
 
 ## Features
 
@@ -12,7 +12,6 @@ A robust CLI tool to parse SQL queries and extract table names using a regex-bas
 - **Comment Removal**: Strips single-line and multi-line SQL comments
 - **File Input**: Read SQL from files
 - **Known Tables**: Filter results using a known tables list (e.g., from Metabase)
-- **Comprehensive Testing**: 35 test cases covering edge cases and esoteric SQL
 
 ## Setup
 
@@ -144,7 +143,7 @@ pnpm test:coverage
 - Quoted identifiers (backticks, double quotes, square brackets)
 - JOIN variations (INNER, LEFT, RIGHT, FULL, CROSS, OUTER)
 - CTE handling (basic and recursive CTEs)
-- Edge cases (UPDATE, DELETE, INSERT, subqueries, UNION)
+- Edge cases (UPDATE, DELETE, INSERT, subqueries, UNION, deduplication)
 - String literals containing SQL keywords
 - Performance tests (large queries, deeply nested subqueries)
 
@@ -201,23 +200,3 @@ The parser uses a sophisticated regex-based approach that:
    - UNION queries
    - Custom keywords
    - Malformed SQL
-
-## Dependencies
-
-- **commander**: CLI framework
-- **chalk**: Terminal styling
-- **ora**: Loading spinners
-- **TypeScript**: Type safety
-- **tsx**: TypeScript execution
-- **Jest**: Testing framework
-- **@jest/globals**: Explicit Jest imports
-
-## Project Status
-
-✅ **Complete** - All features implemented and tested
-- 35 comprehensive test cases passing
-- Handles quoted identifiers with spaces
-- Properly ignores string literals containing SQL keywords
-- Robust comment removal
-- CTE filtering with known tables
-- CLI with file input and verbose output
