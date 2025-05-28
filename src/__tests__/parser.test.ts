@@ -318,6 +318,33 @@ describe('SqlTableExtractor', () => {
       const result = SqlTableExtractor.extractTableNames(sql);
       expect(result.allTables).toEqual(['users']);
     });
+
+    test('should deduplicate tables when same table is referenced multiple times', () => {
+      const sql = `
+        SELECT u1.name, u2.email, u3.phone
+        FROM users u1
+        JOIN users u2 ON u1.manager_id = u2.id
+        LEFT JOIN users u3 ON u2.mentor_id = u3.id
+        JOIN orders o ON u1.id = o.user_id
+        JOIN users u4 ON o.created_by = u4.id
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['users', 'orders']);
+      expect(result.allTables).toHaveLength(2);
+    });
+
+    test('should deduplicate tables with different aliases and schema notation', () => {
+      const sql = `
+        SELECT *
+        FROM public.users main_user
+        JOIN public.users manager ON main_user.manager_id = manager.id
+        JOIN users subordinate ON subordinate.manager_id = main_user.id
+        JOIN public.users creator ON creator.id = main_user.created_by
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['public.users', 'users']);
+      expect(result.allTables).toHaveLength(2);
+    });
   });
 
   describe('Custom keywords', () => {
