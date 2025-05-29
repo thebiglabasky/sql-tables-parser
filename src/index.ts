@@ -6,8 +6,8 @@ import { readFileSync } from 'fs';
 import ora from 'ora';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { SqlTableExtractor } from './parser.js';
-import { defaultSqlKeywords, getKeywordsForDatabase } from './sql-keywords-config.js';
+import { SqlTableExtractor, TableMetadata } from './parser.js';
+import { defaultSqlKeywords, getAllKeywords } from './sql-keywords-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,10 +30,9 @@ program
   .argument('<query>', 'SQL query to parse (or file path if using --file)')
   .option('-f, --file', 'Read SQL from file instead of argument')
   .option('-v, --verbose', 'Show verbose output')
-  .option('-k, --known-tables <tables>', 'Comma-separated list of known table names for CTE filtering')
+  .option('-t, --known-tables <file>', 'Path to JSON file containing known table definitions')
   .option('--filter-ctes', 'Filter out CTEs using known tables')
   .option('--keywords <keywords>', 'Comma-separated list of SQL keywords to look for (overrides defaults)')
-  .option('--database <type>', 'Database type for keywords: postgresql, mysql, sqlserver, oracle, bigquery, snowflake, sqlite')
   .option('--custom-keywords <keywords>', 'Additional keywords to include (comma-separated)')
   .action(async (queryOrPath: string, options: {
     file?: boolean;
@@ -41,7 +40,6 @@ program
     knownTables?: string;
     filterCtes?: boolean;
     keywords?: string;
-    database?: string;
     customKeywords?: string;
   }) => {
     const spinner = ora('Parsing SQL query...').start();
@@ -64,12 +62,44 @@ program
         sql = queryOrPath;
       }
 
-      // Parse known tables if provided
-      let knownTables: Set<string> | undefined;
+      // Parse known tables from JSON file if provided
+      let knownTables: Map<string, TableMetadata> | undefined;
       if (options.knownTables) {
-        knownTables = new Set(
-          options.knownTables.split(',').map(t => t.trim()).filter(t => t.length > 0)
-        );
+        try {
+          const tablesJson = readFileSync(options.knownTables, 'utf-8');
+          const tablesData = JSON.parse(tablesJson);
+
+          if (typeof tablesData !== 'object' || tablesData === null) {
+            throw new Error('JSON file must contain an object');
+          }
+
+          knownTables = new Map();
+          for (const [key, value] of Object.entries(tablesData)) {
+            if (typeof value === 'object' && value !== null) {
+              const metadata = value as any;
+              if (typeof metadata.tableName === 'string' && typeof metadata.fullyQualifiedName === 'string') {
+                knownTables.set(key, {
+                  tableName: metadata.tableName,
+                  fullyQualifiedName: metadata.fullyQualifiedName,
+                  schema: metadata.schema,
+                  database: metadata.database
+                });
+              } else {
+                console.warn(chalk.yellow(`Warning: Invalid table metadata for key "${key}" - skipping`));
+              }
+            } else {
+              console.warn(chalk.yellow(`Warning: Invalid table metadata for key "${key}" - skipping`));
+            }
+          }
+
+          if (options.verbose) {
+            console.log(chalk.dim(`Loaded ${knownTables.size} known tables from ${options.knownTables}`));
+          }
+        } catch (error) {
+          spinner.fail(`Failed to read known tables file: ${options.knownTables}`);
+          console.error(chalk.red('Error:'), error instanceof Error ? error.message : String(error));
+          process.exit(1);
+        }
       }
 
       // Parse keywords if provided
@@ -89,7 +119,6 @@ program
         knownTables,
         filterCTEs: options.filterCtes && !!knownTables,
         keywords,
-        databaseType: options.database as any,
         customKeywords
       });
 
@@ -128,18 +157,16 @@ program
         console.log(chalk.dim(sql.replace(/\s+/g, ' ').trim()));
 
         if (knownTables) {
-          console.log(chalk.dim('\nKnown tables:'), Array.from(knownTables).join(', '));
+          console.log(chalk.dim('\nKnown tables loaded:'), knownTables.size);
+          for (const [key, metadata] of knownTables) {
+            console.log(chalk.dim(`  ${key} -> ${metadata.fullyQualifiedName}`));
+          }
         }
 
-        if (keywords || options.database || customKeywords) {
+        if (keywords || customKeywords) {
           console.log(chalk.dim('\nKeywords used:'));
           if (keywords) {
             console.log(chalk.dim('  Direct:'), keywords.join(', '));
-          } else if (options.database) {
-            const dbKeywords = getKeywordsForDatabase(options.database as any);
-            console.log(chalk.dim(`  Database (${options.database}):`), dbKeywords.join(', '));
-          } else {
-            console.log(chalk.dim('  Default:'), defaultSqlKeywords.default.join(', '));
           }
           if (customKeywords) {
             console.log(chalk.dim('  Custom:'), customKeywords.join(', '));
@@ -154,7 +181,7 @@ program
   });
 
 program
-  .command('test')
+  .command('demo')
   .description('Run test cases to demonstrate the parser')
   .action(() => {
     console.log(chalk.blue.bold('\n🧪 SQL Parser Test Cases\n'));
@@ -186,7 +213,51 @@ program
       }
     ];
 
-    const knownTables = new Set(['users', 'posts', 'orders', 'public.users', 'blog.posts', 'user table', 'order table']);
+    // Example table metadata structure
+    const knownTables = new Map([
+      ['users', {
+        tableName: 'users',
+        fullyQualifiedName: 'public.users',
+        schema: 'public',
+        database: 'myapp'
+      }],
+      ['posts', {
+        tableName: 'posts',
+        fullyQualifiedName: 'blog.posts',
+        schema: 'blog',
+        database: 'myapp'
+      }],
+      ['orders', {
+        tableName: 'orders',
+        fullyQualifiedName: 'sales.orders',
+        schema: 'sales',
+        database: 'myapp'
+      }],
+      ['public.users', {
+        tableName: 'users',
+        fullyQualifiedName: 'public.users',
+        schema: 'public',
+        database: 'myapp'
+      }],
+      ['blog.posts', {
+        tableName: 'posts',
+        fullyQualifiedName: 'blog.posts',
+        schema: 'blog',
+        database: 'myapp'
+      }],
+      ['user table', {
+        tableName: 'user table',
+        fullyQualifiedName: 'public.user_table',
+        schema: 'public'
+      }],
+      ['order table', {
+        tableName: 'order table',
+        fullyQualifiedName: 'sales.order_table',
+        schema: 'sales'
+      }]
+    ]);
+
+    console.log(chalk.dim('Using example table metadata structure:\n'));
 
     testQueries.forEach((test, index) => {
       console.log(chalk.yellow(`${index + 1}. ${test.name}`));
@@ -204,51 +275,32 @@ program
       }
       console.log();
     });
+
+    console.log(chalk.dim('To use your own table definitions, create a JSON file like example-tables.json'));
+    console.log(chalk.dim('and use: sql-parser parse "query" --known-tables your-tables.json --filter-ctes'));
   });
 
 program
   .command('keywords')
-  .description('Show available SQL keywords by database type')
-  .option('-d, --database <type>', 'Show keywords for specific database')
-  .action((options: { database?: string }) => {
+  .description('Show available SQL keywords')
+  .action(() => {
     console.log(chalk.blue.bold('\n📋 SQL Keywords Configuration\n'));
 
-    if (options.database) {
-      // Show keywords for specific database
-      const dbType = options.database.toLowerCase();
-      if (dbType in defaultSqlKeywords.databaseSpecific) {
-        const keywords = getKeywordsForDatabase(dbType as any);
-        console.log(chalk.yellow(`Keywords for ${dbType}:`));
-        console.log(chalk.dim('\nDefault keywords:'));
-        defaultSqlKeywords.default.forEach(k => console.log(`  - ${k}`));
+    console.log(chalk.yellow('Default keywords (commonly used):'));
+    defaultSqlKeywords.default.forEach(k => console.log(`  - ${k}`));
 
-        const dbSpecific = defaultSqlKeywords.databaseSpecific[dbType as keyof typeof defaultSqlKeywords.databaseSpecific];
-        if (dbSpecific.length > 0) {
-          console.log(chalk.dim('\nDatabase-specific keywords:'));
-          dbSpecific.forEach(k => console.log(`  - ${k}`));
-        }
+    console.log(chalk.yellow('\nAll available keywords:'));
+    const allKeywords = getAllKeywords();
+    const extendedKeywords = allKeywords.filter(k => !defaultSqlKeywords.default.includes(k));
 
-        console.log(chalk.dim(`\nTotal: ${keywords.length} keywords`));
-      } else {
-        console.log(chalk.red(`Unknown database type: ${options.database}`));
-        console.log(chalk.dim('Available types: postgresql, mysql, sqlserver, oracle, bigquery, snowflake, sqlite'));
-      }
-    } else {
-      // Show all keywords organized by category
-      console.log(chalk.yellow('Default keywords (common across all databases):'));
-      defaultSqlKeywords.default.forEach(k => console.log(`  - ${k}`));
-
-      console.log(chalk.yellow('\nDatabase-specific keywords:'));
-      Object.entries(defaultSqlKeywords.databaseSpecific).forEach(([db, keywords]) => {
-        if (keywords.length > 0) {
-          console.log(chalk.cyan(`\n${db}:`));
-          keywords.forEach(k => console.log(`  - ${k}`));
-        }
-      });
+    if (extendedKeywords.length > 0) {
+      console.log(chalk.cyan('\nAdditional keywords from various databases:'));
+      extendedKeywords.forEach(k => console.log(`  - ${k}`));
     }
 
-    console.log(chalk.dim('\nUse --database <type> to see keywords for a specific database'));
-    console.log(chalk.dim('Use --keywords to override with custom keywords when parsing'));
+    console.log(chalk.dim(`\nTotal available: ${allKeywords.length} keywords`));
+    console.log(chalk.dim('Use --keywords to specify which keywords to use when parsing'));
+    console.log(chalk.dim('Use --custom-keywords to add additional keywords beyond the defaults'));
   });
 
 program
@@ -262,33 +314,47 @@ program
     console.log('  sql-parser parse "SELECT * FROM users JOIN orders ON users.id = orders.user_id"');
     console.log('  sql-parser parse query.sql --file');
     console.log('  sql-parser parse "SELECT * FROM products" --verbose');
-    console.log('  sql-parser parse "WITH cte AS (...) SELECT * FROM cte" --known-tables users,orders --filter-ctes');
-    console.log('  sql-parser parse "MERGE INTO users" --database sqlserver');
-    console.log('  sql-parser keywords --database postgresql\n');
+    console.log('  sql-parser parse "WITH cte AS (...) SELECT * FROM cte" --known-tables tables.json --filter-ctes');
+    console.log('  sql-parser parse "MERGE INTO users" --keywords "MERGE INTO,USING"');
+    console.log('  sql-parser keywords\n');
 
     console.log(chalk.yellow('Commands:'));
     console.log('  parse <query>  Parse SQL query and extract table names');
-    console.log('  test           Run test cases to demonstrate the parser');
+    console.log('  demo           Run test cases to demonstrate the parser');
     console.log('  keywords       Show available SQL keywords by database type');
     console.log('  help           Show this help message\n');
 
     console.log(chalk.yellow('Options:'));
     console.log('  -f, --file                    Read SQL from file');
     console.log('  -v, --verbose                 Show verbose output');
-    console.log('  -k, --known-tables <tables>   Comma-separated known table names');
+    console.log('  -t, --known-tables <file>     Path to JSON file containing known table definitions');
     console.log('  --filter-ctes                 Filter out CTEs using known tables');
     console.log('  --keywords <keywords>         Comma-separated list of SQL keywords to look for');
-    console.log('  --database <type>             Database type for keywords');
     console.log('  --custom-keywords <keywords>  Additional keywords to include');
     console.log('  --version                     Show version number\n');
 
     console.log(chalk.dim('Examples:'));
     console.log(chalk.dim('  sql-parser parse "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"'));
     console.log(chalk.dim('  sql-parser parse complex-query.sql --file --verbose'));
-    console.log(chalk.dim('  sql-parser parse "WITH temp AS (...) SELECT * FROM temp" --known-tables users --filter-ctes'));
+    console.log(chalk.dim('  sql-parser parse "WITH temp AS (...) SELECT * FROM temp" --known-tables my-tables.json --filter-ctes'));
     console.log(chalk.dim('  sql-parser parse "MERGE INTO users USING source" --keywords "MERGE INTO,USING"'));
-    console.log(chalk.dim('  sql-parser keywords --database postgresql'));
-    console.log(chalk.dim('  sql-parser test'));
+    console.log(chalk.dim('  sql-parser keywords'));
+    console.log(chalk.dim('  sql-parser demo'));
+
+    console.log(chalk.yellow('\nJSON file format for known tables:'));
+    console.log(chalk.dim('  {'));
+    console.log(chalk.dim('    "users": {'));
+    console.log(chalk.dim('      "tableName": "users",'));
+    console.log(chalk.dim('      "fullyQualifiedName": "public.users",'));
+    console.log(chalk.dim('      "schema": "public",'));
+    console.log(chalk.dim('      "database": "mydb"'));
+    console.log(chalk.dim('    },'));
+    console.log(chalk.dim('    "orders": {'));
+    console.log(chalk.dim('      "tableName": "orders",'));
+    console.log(chalk.dim('      "fullyQualifiedName": "sales.orders",'));
+    console.log(chalk.dim('      "schema": "sales"'));
+    console.log(chalk.dim('    }'));
+    console.log(chalk.dim('  }'));
   });
 
 // Show help by default if no command provided
@@ -298,8 +364,8 @@ if (process.argv.length <= 2) {
   program.parse();
 }
 
-// Export for programmatic usage
-export { SqlTableExtractor } from './parser.js';
-export { createCustomKeywordsConfig, defaultSqlKeywords, getKeywordsForDatabase } from './sql-keywords-config.js';
+// Export the main parser and types for library usage
+export { SqlTableExtractor, TableExtractionOptions, TableExtractionResult, TableMetadata } from './parser.js';
+export { defaultSqlKeywords, getAllKeywords } from './sql-keywords-config.js';
 export type { SqlKeywordsConfig } from './sql-keywords-config.js';
 

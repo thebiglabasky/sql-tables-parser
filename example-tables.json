@@ -1,0 +1,46 @@
+{
+  "users": {
+    "tableName": "users",
+    "fullyQualifiedName": "public.users",
+    "schema": "public",
+    "database": "myapp"
+  },
+  "orders": {
+    "tableName": "orders",
+    "fullyQualifiedName": "sales.orders",
+    "schema": "sales",
+    "database": "myapp"
+  },
+  "products": {
+    "tableName": "products",
+    "fullyQualifiedName": "inventory.products",
+    "schema": "inventory"
+  },
+  "user_profiles": {
+    "tableName": "user_profiles",
+    "fullyQualifiedName": "public.user_profiles",
+    "schema": "public"
+  },
+  "public.users": {
+    "tableName": "users",
+    "fullyQualifiedName": "public.users",
+    "schema": "public",
+    "database": "myapp"
+  },
+  "sales.orders": {
+    "tableName": "orders",
+    "fullyQualifiedName": "sales.orders",
+    "schema": "sales",
+    "database": "myapp"
+  },
+  "user table": {
+    "tableName": "user table",
+    "fullyQualifiedName": "public.user_table",
+    "schema": "public"
+  },
+  "order table": {
+    "tableName": "order table",
+    "fullyQualifiedName": "sales.order_table",
+    "schema": "sales"
+  }
+}

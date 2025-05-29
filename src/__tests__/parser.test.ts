@@ -1,5 +1,5 @@
 import { describe, expect, test } from '@jest/globals';
-import { SqlTableExtractor } from '../parser';
+import { SqlTableExtractor, TableMetadata } from '../parser';
 
 describe('SqlTableExtractor', () => {
   describe('Basic functionality', () => {
@@ -120,7 +120,11 @@ describe('SqlTableExtractor', () => {
         SELECT * FROM user_orders uo
         JOIN products p ON uo.product_id = p.id
       `;
-      const knownTables = new Set(['users', 'orders', 'products']);
+      const knownTables = new Map([
+        ['users', { tableName: 'users', fullyQualifiedName: 'users' }],
+        ['orders', { tableName: 'orders', fullyQualifiedName: 'orders' }],
+        ['products', { tableName: 'products', fullyQualifiedName: 'products' }]
+      ]);
       const result = SqlTableExtractor.extractTableNames(sql, {
         knownTables,
         filterCTEs: true
@@ -147,7 +151,10 @@ describe('SqlTableExtractor', () => {
         SELECT * FROM employee_hierarchy
         JOIN departments d ON employee_hierarchy.dept_id = d.id
       `;
-      const knownTables = new Set(['employees', 'departments']);
+      const knownTables = new Map([
+        ['employees', { tableName: 'employees', fullyQualifiedName: 'employees' }],
+        ['departments', { tableName: 'departments', fullyQualifiedName: 'departments' }]
+      ]);
       const result = SqlTableExtractor.extractTableNames(sql, {
         knownTables,
         filterCTEs: true
@@ -155,6 +162,121 @@ describe('SqlTableExtractor', () => {
 
       expect(result.realTables).toEqual(['employees', 'departments']);
       expect(result.filteredCTEs).toEqual(['employee_hierarchy']);
+    });
+
+    test('should handle CTE scope masking', () => {
+      const sql = `
+        WITH c AS (SELECT x FROM b),
+             b AS (SELECT y FROM a),
+             a AS (SELECT x FROM c)
+        SELECT a.x, b.y FROM a, b
+      `;
+      const knownTables = new Map([
+        ['a', { tableName: 'a', fullyQualifiedName: 'a' }],
+        ['b', { tableName: 'b', fullyQualifiedName: 'b' }],
+        ['c', { tableName: 'c', fullyQualifiedName: 'c' }]
+      ]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      expect(result.allTables).toContain('b');
+      expect(result.allTables).toContain('a');
+      expect(result.allTables).toContain('c');
+      expect(result.realTables).toEqual(['b', 'a', 'c']);
+      expect(result.filteredCTEs).toEqual([]);
+    });
+
+    test('should handle CTE dead scope - CTE not used in main query', () => {
+      const sql = `
+        WITH cte AS (
+          SELECT x FROM t1
+        )
+        SELECT x, y FROM t2
+      `;
+      const knownTables = new Map([
+        ['t1', { tableName: 't1', fullyQualifiedName: 't1' }],
+        ['t2', { tableName: 't2', fullyQualifiedName: 't2' }]
+      ]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      expect(result.allTables).toContain('t1');
+      expect(result.allTables).toContain('t2');
+      expect(result.realTables).toEqual(['t1', 't2']);
+      expect(result.filteredCTEs).toEqual([]);
+    });
+
+    test('should handle nested CTEs', () => {
+      const sql = `
+        WITH c AS (
+            WITH b AS (
+                SELECT x as y, y as z, z as x
+                FROM a
+            )
+            SELECT x as y, y as z, z as x
+            FROM b
+        )
+        SELECT x, y, z
+        FROM c
+      `;
+      const knownTables = new Map([
+        ['a', { tableName: 'a', fullyQualifiedName: 'a' }]
+      ]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      expect(result.allTables).toContain('a');
+      expect(result.allTables).toContain('b');
+      expect(result.allTables).toContain('c');
+      expect(result.realTables).toEqual(['a']);
+      expect(result.filteredCTEs).toContain('b');
+      expect(result.filteredCTEs).toContain('c');
+    });
+
+
+    test('should handle CTEs with aggregate functions and no source columns', () => {
+      const sql = `
+        WITH cte AS (SELECT COUNT(*) AS a FROM foo)
+        SELECT a AS b FROM cte
+      `;
+      const knownTables = new Map([
+        ['foo', { tableName: 'foo', fullyQualifiedName: 'foo' }]
+      ]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      expect(result.allTables).toContain('foo');
+      expect(result.allTables).toContain('cte');
+      expect(result.realTables).toEqual(['foo']);
+      expect(result.filteredCTEs).toEqual(['cte']);
+    });
+
+    test('should handle reserved word "final" as CTE name', () => {
+      const sql = `
+        with final as (
+           select
+             id,
+             amount_paid_cents::float / 100 as amount_paid
+           from invoice
+           where not is_deleted
+         )
+         select * from final
+      `;
+      const knownTables = new Map([
+        ['invoice', { tableName: 'invoice', fullyQualifiedName: 'invoice' }]
+      ]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      expect(result.allTables).toContain('invoice');
+      expect(result.allTables).toContain('final');
+      expect(result.realTables).toEqual(['invoice']);
+      expect(result.filteredCTEs).toEqual(['final']);
     });
   });
 
@@ -403,7 +525,10 @@ describe('SqlTableExtractor', () => {
         WITH temp AS (SELECT * FROM users)
         SELECT * FROM temp JOIN orders ON temp.id = orders.user_id
       `;
-      const knownTables = new Set(['users', 'orders']);
+      const knownTables = new Map([
+        ['users', { tableName: 'users', fullyQualifiedName: 'users' }],
+        ['orders', { tableName: 'orders', fullyQualifiedName: 'orders' }]
+      ]);
       const result = SqlTableExtractor.getTableNamesSimple(sql, knownTables);
       expect(result).toEqual(['users', 'orders']);
     });
@@ -591,9 +716,16 @@ describe('SqlTableExtractor', () => {
         )
         GROUP BY cs.user_id, u.name, cs.customer_total, cs.segment
       `;
-      const knownTables = new Set([
-        'orders', 'order_items', 'fiscal_periods', 'users', 'user_statuses',
-        'product_categories', 'user_preferences', 'loyalty_programs', 'loyalty_tiers'
+      const knownTables = new Map([
+        ['orders', { tableName: 'orders', fullyQualifiedName: 'orders' }],
+        ['order_items', { tableName: 'order_items', fullyQualifiedName: 'order_items' }],
+        ['fiscal_periods', { tableName: 'fiscal_periods', fullyQualifiedName: 'fiscal_periods' }],
+        ['users', { tableName: 'users', fullyQualifiedName: 'users' }],
+        ['user_statuses', { tableName: 'user_statuses', fullyQualifiedName: 'user_statuses' }],
+        ['product_categories', { tableName: 'product_categories', fullyQualifiedName: 'product_categories' }],
+        ['user_preferences', { tableName: 'user_preferences', fullyQualifiedName: 'user_preferences' }],
+        ['loyalty_programs', { tableName: 'loyalty_programs', fullyQualifiedName: 'loyalty_programs' }],
+        ['loyalty_tiers', { tableName: 'loyalty_tiers', fullyQualifiedName: 'loyalty_tiers' }]
       ]);
       const result = SqlTableExtractor.extractTableNames(sql, {
         knownTables,
@@ -762,7 +894,7 @@ describe('SqlTableExtractor', () => {
       expect(result.allTables).not.toContain('FLATTEN');
     });
 
-    test('should handle database-specific keywords that need custom support', () => {
+    test('should handle database-specific keywords with keywords option', () => {
       const sql = `
         MERGE INTO target_users t
         USING source_users s ON t.id = s.id
@@ -776,7 +908,7 @@ describe('SqlTableExtractor', () => {
         SELECT * FROM users WHERE last_updated > NOW() - INTERVAL 1 HOUR;
       `;
       const result = SqlTableExtractor.extractTableNames(sql, {
-        customKeywords: ['MERGE INTO', 'USING', 'UPSERT INTO', 'REPLACE INTO']
+        keywords: ['FROM', 'JOIN', 'MERGE INTO', 'USING', 'UPSERT INTO', 'REPLACE INTO']
       });
       expect(result.allTables).toContain('target_users');
       expect(result.allTables).toContain('source_users');
@@ -903,7 +1035,11 @@ describe('SqlTableExtractor', () => {
         JOIN employees e ON f.id = e.id  -- Real table
         JOIN users u ON e.manager_id = u.id  -- CTE, not real users table
       `;
-      const knownTables = new Set(['employees', 'departments', 'users']);
+      const knownTables = new Map([
+        ['employees', { tableName: 'employees', fullyQualifiedName: 'employees' }],
+        ['departments', { tableName: 'departments', fullyQualifiedName: 'departments' }],
+        ['users', { tableName: 'users', fullyQualifiedName: 'users' }]
+      ]);
       const result = SqlTableExtractor.extractTableNames(sql, {
         knownTables,
         filterCTEs: true
@@ -931,6 +1067,478 @@ describe('SqlTableExtractor', () => {
       malformedQueries.forEach(sql => {
         expect(() => SqlTableExtractor.extractTableNames(sql)).not.toThrow();
       });
+    });
+  });
+
+  describe('Additional DML patterns from fixtures', () => {
+    test('should handle FILTER (WHERE ...) clauses', () => {
+      const sql = `
+        select
+            e.instance_id,
+            percentile_cont(0.75) within group (order by e.running_time) as p75_time,
+            percentile_cont(0.75) within group (order by e.running_time) filter (where e.error = '') as p75_success_time
+        from execution e
+        group by 1
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['execution']);
+    });
+
+    test('should handle subselect with table masking', () => {
+      const sql = `
+        SELECT
+        CASE WHEN Addr.country = 'US' THEN Addr.state ELSE 'ex-US' END AS state
+        FROM (
+            SELECT DISTINCT
+                coalesce(Cust.state, Addr.region) AS state,
+                coalesce(Cust.country, Addr.country) AS country
+            FROM orders
+                LEFT JOIN addresses AS Addr ON orders.organization_id = Addr.organization_id
+                LEFT JOIN customers AS Cust ON orders.customer_id = Cust.id
+        ) AS Addr
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toContain('orders');
+      expect(result.allTables).toContain('addresses');
+      expect(result.allTables).toContain('customers');
+    });
+
+    test('should handle SELECT with literal values only', () => {
+      const sql = "SELECT FALSE, 'str', 1";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle SELECT with mixed literals and table columns', () => {
+      const sql = "SELECT FALSE, 'str', 1, x FROM t";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['t']);
+    });
+
+    test('should handle SELECT INTO statements', () => {
+      const sql = `
+        SELECT id, name
+        INTO new_user_summary
+        FROM user
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toContain('user');
+      expect(result.allTables).toContain('new_user_summary');
+    });
+
+    test('should handle string concatenation operators', () => {
+      const sql = 'SELECT x || y AS z FROM t';
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['t']);
+    });
+
+    test('should handle complex window functions with multiple OVER clauses', () => {
+      const sql = `
+        SELECT
+            column_2564,
+            (column_2563 / column_2561) / 2 * 100,
+            NVL(LEAST(column_2562, ABS(column_2560)) / column_2561, 0),
+            LEAST(
+                SUM(column_2562) OVER (ORDER BY column_7299 ROWS BETWEEN 11 PRECEDING AND CURRENT ROW),
+                ABS(SUM(column_2560) OVER (ORDER BY column_7299 ROWS BETWEEN 11 PRECEDING AND CURRENT ROW))
+            ) / AVG(column_2561) OVER (ORDER BY column_7299 ROWS BETWEEN 11 PRECEDING AND CURRENT ROW)
+        FROM table_2559
+        ORDER BY column_7421 ASC
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['table_2559']);
+    });
+
+    test('should handle TIMESTAMP WITH TIME ZONE in BETWEEN clause', () => {
+      const sql = `
+        SELECT
+            date_trunc('month', instance_started)::DATE AS month_started,
+            avg(time_finished - instance_started) as avg_runtime,
+            count(*) AS total_instances
+        FROM usage_stats
+        WHERE instance_started BETWEEN TIMESTAMP WITH TIME ZONE '2019-01-01 00:00:00.000-08:00' AND NOW()
+        GROUP BY month_started
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      expect(result.allTables).toEqual(['usage_stats']);
+    });
+
+    test('should handle generate_series and table-valued functions', () => {
+      const sql = `
+        SELECT t.day::date AS date
+        FROM generate_series(timestamp '2021-01-01', now(), interval '1 day') AS t(day)
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // generate_series is a function, not a table - should not be extracted
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle EXECUTE statements with parameters', () => {
+      const sql = "EXECUTE stmt('table_name')";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // EXECUTE statements don't contain direct table references
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle dynamic SQL with string concatenation gracefully', () => {
+      const sql = "EXECUTE 'SELECT * FROM ' || table_name";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // Dynamic SQL can't be parsed for table names
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle CALL statements for stored procedures', () => {
+      const sql = "CALL user_function('table_name')";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // CALL statements don't reference tables directly
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle SELECT with user-defined functions', () => {
+      const sql = "SELECT user_function('table_name')";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // Function calls in SELECT don't reference tables
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle FETCH statements with cursors', () => {
+      const sql = 'FETCH ALL FROM my_cursor';
+      const knownTables = new Map<string, TableMetadata>([]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      // Cursors aren't known tables
+      expect(result.allTables).toEqual(['my_cursor']);
+      expect(result.realTables).toEqual([]);
+    });
+
+    test('should handle format function gracefully', () => {
+      const sql = "SELECT * FROM format('%I', table_name_variable)";
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // format() is a function, not a table. Dynamic table names aren't detected.
+      expect(result.allTables).toEqual([]);
+    });
+
+    test('should handle complex EXECUTE statements', () => {
+      const sql = `
+        EXECUTE format('SELECT * FROM %I WHERE id = $1', table_name) USING 123;
+      `;
+      const knownTables = new Map<string, TableMetadata>([]);
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+      // Dynamic SQL within EXECUTE can't be parsed. Dynamic table names aren't detected.
+      // USING however could reference a table. Here it doesn't so should be filtered out by knownTables.
+      expect(result.allTables).toEqual(['123']);
+      expect(result.realTables).toEqual([]);
+    });
+
+    test('should handle CALL with table parameters but no table access', () => {
+      const sql = `
+        CALL process_data('users', 'orders');
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql);
+      // String literals in CALL are parameters, not table references. Dynamic table names aren't detected.
+      expect(result.allTables).toEqual([]);
+    });
+  });
+
+  describe('Table metadata and fully qualified names', () => {
+    test('should return fully qualified names when using TableMetadata', () => {
+      const sql = 'SELECT * FROM users JOIN orders ON users.id = orders.user_id';
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'sales.orders',
+          schema: 'sales'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['public.users', 'sales.orders']);
+    });
+
+    test('should handle direct table name mapping', () => {
+      const sql = 'SELECT * FROM user_data JOIN order_info ON user_data.id = order_info.user_id';
+
+      const knownTables = new Map([
+        ['user_data', {
+          tableName: 'user_data',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['order_info', {
+          tableName: 'order_info',
+          fullyQualifiedName: 'sales.orders',
+          schema: 'sales'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['public.users', 'sales.orders']);
+    });
+
+    test('should handle schema-qualified table references', () => {
+      const sql = 'SELECT * FROM public.users JOIN sales.orders ON users.id = orders.user_id';
+
+      const knownTables = new Map([
+        ['public.users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['sales.orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'sales.orders',
+          schema: 'sales'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['public.users', 'sales.orders']);
+    });
+
+    test('should return original name when not found in metadata', () => {
+      const sql = 'SELECT * FROM unknown_table JOIN users ON unknown_table.id = users.user_id';
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['unknown_table', 'public.users']);
+    });
+
+    test('should handle database.schema.table format', () => {
+      const sql = 'SELECT * FROM users JOIN orders ON users.id = orders.user_id';
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'mydb.public.users',
+          schema: 'public',
+          database: 'mydb'
+        }],
+        ['orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'mydb.sales.orders',
+          schema: 'sales',
+          database: 'mydb'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['mydb.public.users', 'mydb.sales.orders']);
+    });
+
+    test('should filter CTEs correctly with TableMetadata', () => {
+      const sql = `
+        WITH temp_users AS (
+          SELECT * FROM users WHERE active = true
+        )
+        SELECT * FROM temp_users JOIN orders ON temp_users.id = orders.user_id
+      `;
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'sales.orders',
+          schema: 'sales'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        knownTables,
+        filterCTEs: true
+      });
+
+      expect(result.allTables).toEqual(['public.users', 'temp_users', 'sales.orders']);
+      expect(result.realTables).toEqual(['public.users', 'sales.orders']);
+      expect(result.filteredCTEs).toEqual(['temp_users']);
+    });
+
+    test('should handle mixed table reference styles', () => {
+      const sql = `
+        SELECT * FROM users u
+        JOIN public.orders o ON u.id = o.user_id
+        JOIN user_profiles up ON u.id = up.user_id
+      `;
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['public.orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'public.orders',
+          schema: 'public'
+        }],
+        ['user_profiles', {
+          tableName: 'user_profiles',
+          fullyQualifiedName: 'public.profiles',
+          schema: 'public'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      expect(result.allTables).toEqual(['public.users', 'public.orders', 'public.profiles']);
+    });
+
+    test('getTableNamesSimple should work with TableMetadata', () => {
+      const sql = 'SELECT * FROM users JOIN orders ON users.id = orders.user_id';
+
+      const knownTables = new Map([
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['orders', {
+          tableName: 'orders',
+          fullyQualifiedName: 'sales.orders',
+          schema: 'sales'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.getTableNamesSimple(sql, knownTables);
+      expect(result).toEqual(['public.users', 'sales.orders']);
+    });
+
+    test('should handle case where table name matches multiple metadata entries', () => {
+      const sql = 'SELECT * FROM users';
+
+      const knownTables = new Map([
+        ['public.users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }],
+        ['private.users', {
+          tableName: 'users',
+          fullyQualifiedName: 'private.users',
+          schema: 'private'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      // Should return the first match found
+      expect(result.allTables).toEqual(['public.users']);
+    });
+
+    test('should prioritize exact key matches over table name matches', () => {
+      const sql = 'SELECT * FROM users';
+
+      const knownTables = new Map([
+        ['admin.users', {
+          tableName: 'users',
+          fullyQualifiedName: 'admin.users',
+          schema: 'admin'
+        }],
+        ['users', {
+          tableName: 'users',
+          fullyQualifiedName: 'public.users',
+          schema: 'public'
+        }]
+      ]);
+
+      const result = SqlTableExtractor.extractTableNames(sql, { knownTables });
+      // Should match the exact key 'users' first
+      expect(result.allTables).toEqual(['public.users']);
+    });
+  });
+
+  describe('Database-specific keywords', () => {
+    test('should handle PostgreSQL-specific keywords', () => {
+      const sql = 'UPSERT INTO users (id, name) VALUES (1, "John")';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'UPSERT INTO', 'MERGE INTO', 'USING']
+      });
+      expect(result.allTables).toEqual(['users']);
+    });
+
+    test('should handle SQL Server-specific keywords', () => {
+      const sql = 'MERGE INTO target_table USING source_table ON target_table.id = source_table.id';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'MERGE INTO', 'USING', 'REPLACE INTO']
+      });
+      expect(result.allTables).toEqual(['target_table', 'source_table']);
+    });
+
+    test('should handle MySQL-specific keywords', () => {
+      const sql = 'REPLACE INTO users SELECT * FROM temp_users';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'REPLACE INTO', 'INSERT IGNORE INTO']
+      });
+      expect(result.allTables).toEqual(['users', 'temp_users']);
+    });
+
+    test('should handle Oracle-specific keywords', () => {
+      const sql = 'INSERT ALL INTO users VALUES (1, "John") INTO users VALUES (2, "Jane") SELECT * FROM dual';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'INSERT ALL INTO', 'MERGE INTO', 'USING']
+      });
+      expect(result.allTables).toEqual(['users', 'dual']);
+    });
+
+    test('should handle BigQuery-specific keywords', () => {
+      const sql = 'CREATE OR REPLACE TABLE dataset.new_table AS SELECT * FROM dataset.source_table';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'CREATE TABLE', 'CREATE OR REPLACE TABLE', 'SELECT * FROM']
+      });
+      expect(result.allTables).toEqual(['dataset.new_table', 'dataset.source_table']);
+    });
+
+    test('should handle Snowflake-specific keywords', () => {
+      const sql = 'CREATE TRANSIENT TABLE temp_data AS SELECT * FROM staging.raw_data';
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'OUTER JOIN',
+                  'INSERT INTO', 'UPDATE', 'DELETE FROM', 'CREATE TABLE', 'CREATE TRANSIENT TABLE', 'CREATE TEMPORARY TABLE']
+      });
+      expect(result.allTables).toEqual(['temp_data', 'staging.raw_data']);
+    });
+
+    test('should handle multiple database patterns with custom keywords', () => {
+      const sql = `
+        MERGE INTO target_users USING source_users ON target_users.id = source_users.id
+        WHEN MATCHED THEN UPDATE SET name = source_users.name
+        WHEN NOT MATCHED THEN INSERT VALUES (source_users.id, source_users.name);
+
+        REPLACE INTO cache_table SELECT * FROM users WHERE active = true;
+
+        UPSERT INTO user_stats (user_id, count) VALUES (1, 5);
+      `;
+      const result = SqlTableExtractor.extractTableNames(sql, {
+        keywords: ['FROM', 'JOIN', 'MERGE INTO', 'USING', 'REPLACE INTO', 'UPSERT INTO', 'INSERT INTO', 'UPDATE', 'DELETE FROM']
+      });
+      expect(result.allTables).toContain('target_users');
+      expect(result.allTables).toContain('source_users');
+      expect(result.allTables).toContain('cache_table');
+      expect(result.allTables).toContain('users');
+      expect(result.allTables).toContain('user_stats');
     });
   });
 });

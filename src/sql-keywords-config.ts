@@ -1,20 +1,8 @@
 export interface SqlKeywordsConfig {
   /** Default keywords that are common across all SQL dialects */
   default: string[];
-
-  /** Database-specific keywords organized by database type */
-  databaseSpecific: {
-    postgresql: string[];
-    mysql: string[];
-    sqlserver: string[];
-    oracle: string[];
-    bigquery: string[];
-    snowflake: string[];
-    sqlite: string[];
-  };
-
-  /** All keywords merged (computed) */
-  all?: string[];
+  /** All available keywords that users can choose from */
+  all: string[];
 }
 
 export const defaultSqlKeywords: SqlKeywordsConfig = {
@@ -40,61 +28,53 @@ export const defaultSqlKeywords: SqlKeywordsConfig = {
     'USING'
   ],
 
-  databaseSpecific: {
-    postgresql: [
-      'LATERAL JOIN',
-      'RETURNING'
-    ],
+  all: [
+    // Basic table references
+    'FROM',
+    'JOIN',
+    'INNER JOIN',
+    'LEFT JOIN',
+    'RIGHT JOIN',
+    'FULL JOIN',
+    'CROSS JOIN',
+    'OUTER JOIN',
 
-    mysql: [
-      'STRAIGHT_JOIN',
-      'REPLACE INTO'
-    ],
+    // DML operations
+    'INTO',
+    'UPDATE',
+    'DELETE FROM',
+    'INSERT INTO',
+    'REPLACE INTO',
+    'UPSERT INTO',
+    'MERGE INTO',
+    'USING',
 
-    sqlserver: [
-      'CROSS APPLY',
-      'OUTER APPLY',
-      'MERGE INTO',
-      'OUTPUT'
-    ],
-
-    oracle: [
-      'CONNECT BY',
-      'MERGE INTO',
-      'MODEL'
-    ],
-
-    bigquery: [
-      'MERGE INTO'
-    ],
-
-    snowflake: [
-      'LATERAL FLATTEN',
-      'MERGE INTO',
-      'COPY INTO'
-    ],
-
-    sqlite: [
-      'REPLACE INTO'
-    ]
-  }
+    // Extended keywords from various databases
+    'LATERAL JOIN',
+    'RETURNING',
+    'STRAIGHT_JOIN',
+    'CROSS APPLY',
+    'OUTER APPLY',
+    'OUTPUT',
+    'CONNECT BY',
+    'MODEL',
+    'LATERAL FLATTEN',
+    'COPY INTO',
+    'CREATE TABLE',
+    'CREATE OR REPLACE TABLE',
+    'CREATE TRANSIENT TABLE',
+    'CREATE TEMPORARY TABLE',
+    'INSERT ALL INTO',
+    'INSERT IGNORE INTO',
+    'SELECT * FROM'
+  ]
 };
 
 /**
- * Get all keywords for a specific database type
+ * Get all available keywords
  */
-export function getKeywordsForDatabase(
-  databaseType?: keyof SqlKeywordsConfig['databaseSpecific'],
-  config: SqlKeywordsConfig = defaultSqlKeywords
-): string[] {
-  const keywords = [...config.default];
-
-  if (databaseType && config.databaseSpecific[databaseType]) {
-    keywords.push(...config.databaseSpecific[databaseType]);
-  }
-
-  // Remove duplicates
-  return Array.from(new Set(keywords));
+export function getAllKeywords(config: SqlKeywordsConfig = defaultSqlKeywords): string[] {
+  return [...config.all];
 }
 
 /**
@@ -105,7 +85,7 @@ export function createCustomKeywordsConfig(
   baseConfig: SqlKeywordsConfig = defaultSqlKeywords
 ): SqlKeywordsConfig {
   return {
-    ...baseConfig,
-    default: [...baseConfig.default, ...customKeywords]
+    default: [...baseConfig.default, ...customKeywords],
+    all: [...baseConfig.all, ...customKeywords]
   };
 }

@@ -1,24 +1,33 @@
-import { defaultSqlKeywords, getKeywordsForDatabase } from './sql-keywords-config.js';
+import { defaultSqlKeywords } from './sql-keywords-config.js';
+
+export interface TableMetadata {
+  /** The table's short name (without schema) */
+  tableName: string;
+  /** The fully qualified name (schema.table or database.schema.table) */
+  fullyQualifiedName: string;
+  /** Schema name if applicable */
+  schema?: string;
+  /** Database name if applicable */
+  database?: string;
+}
 
 export interface TableExtractionResult {
-  /** All tables found in the query */
+  /** All tables found in the query (fully qualified when available) */
   allTables: string[];
-  /** Tables that exist in the known tables set (empty if no filtering) */
+  /** Tables that exist in the known tables set (fully qualified when available) */
   realTables: string[];
-  /** CTE tables that were filtered out (empty if no filtering) */
+  /** CTE tables that were filtered out */
   filteredCTEs: string[];
 }
 
 interface TableExtractionOptions {
-  /** Set of known real table names from Metabase's table index */
-  knownTables?: Set<string>;
+  /** Map of known real table metadata from Metabase's table index */
+  knownTables?: Map<string, TableMetadata>;
   /** Whether to filter out CTE tables using the known tables set */
   filterCTEs?: boolean;
   /** Custom keywords that might precede table names */
   customKeywords?: string[];
-  /** Database type for automatic keyword inclusion (deprecated - use keywords instead) */
-  databaseType?: 'postgresql' | 'mysql' | 'sqlserver' | 'oracle' | 'bigquery' | 'snowflake' | 'sqlite';
-  /** Direct list of keywords to use (overrides databaseType if provided) */
+  /** Direct list of keywords to use (overrides defaults if provided) */
   keywords?: string[];
 }
 
@@ -30,7 +39,7 @@ class SqlTableExtractor {
     sql: string,
     options: TableExtractionOptions = {}
   ): TableExtractionResult {
-    const { knownTables, filterCTEs = false, customKeywords = [], databaseType, keywords } = options;
+    const { knownTables, filterCTEs = false, customKeywords = [], keywords } = options;
 
     // Step 1: Clean the SQL by removing comments and string literals
     const cleanSql = this.removeCommentsAndStrings(sql);
@@ -41,9 +50,6 @@ class SqlTableExtractor {
     if (keywords && keywords.length > 0) {
       // Use provided keywords directly
       allKeywords = keywords;
-    } else if (databaseType) {
-      // Use database-specific keywords from config (backward compatibility)
-      allKeywords = getKeywordsForDatabase(databaseType);
     } else {
       // Use default keywords from config
       allKeywords = defaultSqlKeywords.default;
@@ -106,7 +112,9 @@ class SqlTableExtractor {
           .replace(/"([^"]+)"/g, '$1')     // "name" -> name
           .replace(/`([^`]+)`/g, '$1');    // `name` -> name
 
-        extractedTables.add(cleanTableName);
+        // Resolve to fully qualified name if possible
+        const resolvedName = this.resolveTableName(cleanTableName, knownTables);
+        extractedTables.add(resolvedName);
       }
     }
 
@@ -115,14 +123,11 @@ class SqlTableExtractor {
     // Step 4: Filter CTEs if requested and known tables are provided
     if (filterCTEs && knownTables) {
       const realTables = allTables.filter(table => {
-        // Check if table exists in known tables (with or without schema)
-        const tableWithoutSchema = table.includes('.') ? table.split('.').pop()! : table;
-        return knownTables.has(table) || knownTables.has(tableWithoutSchema);
+        return this.isKnownTable(table, knownTables);
       });
 
       const filteredCTEs = allTables.filter(table => {
-        const tableWithoutSchema = table.includes('.') ? table.split('.').pop()! : table;
-        return !knownTables.has(table) && !knownTables.has(tableWithoutSchema);
+        return !this.isKnownTable(table, knownTables);
       });
 
       return {
@@ -137,6 +142,66 @@ class SqlTableExtractor {
       realTables: allTables,
       filteredCTEs: []
     };
+  }
+
+  /**
+   * Resolve a table name to its fully qualified version if available in known tables
+   */
+  private static resolveTableName(
+    tableName: string,
+    knownTables?: Map<string, TableMetadata>
+  ): string {
+    if (!knownTables) {
+      return tableName;
+    }
+
+    // First, try exact match with the provided name
+    if (knownTables.has(tableName)) {
+      return knownTables.get(tableName)!.fullyQualifiedName;
+    }
+
+    // Try to find by table name without schema
+    const tableWithoutSchema = tableName.includes('.') ? tableName.split('.').pop()! : tableName;
+
+    for (const [key, metadata] of knownTables) {
+      // Check exact match
+      if (key === tableName) {
+        return metadata.fullyQualifiedName;
+      }
+
+      // Check table name match
+      if (metadata.tableName === tableWithoutSchema) {
+        return metadata.fullyQualifiedName;
+      }
+
+      // Check if the provided name is already the fully qualified name
+      if (metadata.fullyQualifiedName === tableName) {
+        return metadata.fullyQualifiedName;
+      }
+    }
+
+    return tableName;
+  }
+
+  /**
+   * Check if a table is known (exists in the known tables collection)
+   */
+  private static isKnownTable(
+    tableName: string,
+    knownTables: Map<string, TableMetadata>
+  ): boolean {
+    // Check if table exists by key, table name, or fully qualified name
+    const tableWithoutSchema = tableName.includes('.') ? tableName.split('.').pop()! : tableName;
+
+    for (const [key, metadata] of knownTables) {
+      if (key === tableName ||
+          metadata.tableName === tableWithoutSchema ||
+          metadata.fullyQualifiedName === tableName) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -228,7 +293,7 @@ class SqlTableExtractor {
   /**
    * Simple helper for when you just want the table names as strings
    */
-  static getTableNamesSimple(sql: string, knownTables?: Set<string>): string[] {
+  static getTableNamesSimple(sql: string, knownTables?: Map<string, TableMetadata>): string[] {
     const result = this.extractTableNames(sql, {
       knownTables,
       filterCTEs: !!knownTables
